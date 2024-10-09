@@ -334,6 +334,30 @@ null
 "badness"
 [1]
 
+try limit(-1; error) catch .
+null
+"limit doesn't support negative count"
+
+[skip(3; .[])]
+[1,2,3,4,5,6,7,8,9]
+[4,5,6,7,8,9]
+
+[skip(0,2,3,4; .[])]
+[1,2,3]
+[1,2,3,3]
+
+[skip(3; .[])]
+[]
+[]
+
+try skip(-1; error) catch .
+null
+"skip doesn't support negative count"
+
+nth(1; 0,1,error("foo"))
+null
+1
+
 [first(range(.)), last(range(.))]
 10
 [0,9]
@@ -2163,6 +2187,9 @@ try ["ok", setpath([1]; 1)] catch ["ko", .]
 {"hi":"hello"}
 ["ko","Cannot index object with number"]
 
+try fromjson catch .
+"{'a': 123}"
+"Invalid string literal; expected \", but got ' at line 1, column 5 (while parsing '{'a': 123}')"
 
 # ltrimstr/1 rtrimstr/1 don't leak on invalid input #2977
 
