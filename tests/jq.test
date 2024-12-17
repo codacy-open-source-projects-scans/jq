@@ -322,6 +322,10 @@ null
 [{"a":1}, {"b":2}, {"a":3, "b":4}]
 [-1, -1, -4]
 
+[foreach range(5) as $x (0; .+$x | select($x!=2); [$x,.])]
+null
+[[0,0],[1,1],[3,4],[4,8]]
+
 [limit(3; .[])]
 [11,22,33,44,55,66,77,88,99]
 [11,22,33]
@@ -361,6 +365,10 @@ null
 [first(range(.)), last(range(.))]
 10
 [0,9]
+
+[first(range(.)), last(range(.))]
+0
+[]
 
 [nth(0,5,9,10,15; range(.)), try nth(-1; range(.)) catch .]
 10
@@ -820,6 +828,10 @@ null
 reduce . as $n (.; .)
 null
 null
+
+reduce range(5) as $x (0; .+$x | select($x!=2))
+null
+8
 
 # Destructuring
 . as {$a, b: [$c, {$d}]} | [$a, $c, $d]
@@ -1411,6 +1423,22 @@ indices([1,2])
 indices(", ")
 "a,b, cd,e, fgh, ijkl"
 [3,9,14]
+
+index("!")
+"здравствуй мир!"
+14
+
+.[:rindex("x")]
+"正xyz"
+"正"
+
+indices("o")
+"🇬🇧oo"
+[2,3]
+
+indices("o")
+"ƒoo"
+[1,2]
 
 [.[]|split(",")]
 ["a, bc, def, ghij, jklmn, a,b, c,d, e,f", "a,b,c,d, e,f,g,h"]
