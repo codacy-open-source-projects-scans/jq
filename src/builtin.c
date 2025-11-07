@@ -1,3 +1,6 @@
+#if __SIZEOF_POINTER__==4
+# define _TIME_BITS 64
+#endif
 #ifndef __sun__
 # define _XOPEN_SOURCE
 # define _XOPEN_SOURCE_EXTENDED 1
@@ -5,24 +8,12 @@
 # define _XPG6
 # define __EXTENSIONS__
 #endif
+#ifdef __OpenBSD__
+# define _BSD_SOURCE
+#endif
 #include <sys/time.h>
 #include <stdlib.h>
 #include <stddef.h>
-#ifdef HAVE_ALLOCA_H
-# include <alloca.h>
-#elif !defined alloca
-# ifdef __GNUC__
-#  define alloca __builtin_alloca
-# elif defined _MSC_VER
-#  include <malloc.h>
-#  define alloca _alloca
-# elif !defined HAVE_ALLOCA
-#  ifdef  __cplusplus
-extern "C"
-#  endif
-void *alloca (size_t);
-# endif
-#endif
 #include <assert.h>
 #include <ctype.h>
 #include <limits.h>
@@ -256,7 +247,7 @@ static jv f_negate(jq_state *jq, jv input) {
   if (jv_get_kind(input) != JV_KIND_NUMBER) {
     return type_error(input, "cannot be negated");
   }
-  jv ret = jv_number(-jv_number_value(input));
+  jv ret = jv_number_negate(input);
   jv_free(input);
   return ret;
 }
@@ -340,21 +331,10 @@ jv binop_multiply(jv a, jv b) {
       str = b;
       num = a;
     }
-    jv res;
     double d = jv_number_value(num);
-    if (d < 0 || isnan(d)) {
-      res = jv_null();
-    } else {
-      int n = d;
-      size_t alen = jv_string_length_bytes(jv_copy(str));
-      res = jv_string_empty(alen * n);
-      for (; n > 0; n--) {
-        res = jv_string_append_buf(res, jv_string_value(str), alen);
-      }
-    }
-    jv_free(str);
     jv_free(num);
-    return res;
+    return jv_string_repeat(str,
+        d < 0 || isnan(d) ? -1 : d > INT_MAX ? INT_MAX : (int)d);
   } else if (ak == JV_KIND_OBJECT && bk == JV_KIND_OBJECT) {
     return jv_object_merge_recursive(a, b);
   } else {
@@ -486,6 +466,23 @@ static jv f_tonumber(jq_state *jq, jv input) {
   return type_error(input, "cannot be parsed as a number");
 }
 
+static jv f_toboolean(jq_state *jq, jv input) {
+  if (jv_get_kind(input) == JV_KIND_TRUE || jv_get_kind(input) == JV_KIND_FALSE) {
+    return input;
+  }
+  if (jv_get_kind(input) == JV_KIND_STRING) {
+    const char *s = jv_string_value(input);
+    if (strcmp(s, "true") == 0) {
+      jv_free(input);
+      return jv_true();
+    } else if (strcmp(s, "false") == 0) {
+      jv_free(input);
+      return jv_false();
+    }
+  }
+  return type_error(input, "cannot be parsed as a boolean");
+}
+
 static jv f_length(jq_state *jq, jv input) {
   if (jv_get_kind(input) == JV_KIND_ARRAY) {
     return jv_number(jv_array_length(input));
@@ -494,7 +491,7 @@ static jv f_length(jq_state *jq, jv input) {
   } else if (jv_get_kind(input) == JV_KIND_STRING) {
     return jv_number(jv_string_length_codepoints(input));
   } else if (jv_get_kind(input) == JV_KIND_NUMBER) {
-    jv r = jv_number(fabs(jv_number_value(input)));
+    jv r = jv_number_abs(input);
     jv_free(input);
     return r;
   } else if (jv_get_kind(input) == JV_KIND_NULL) {
@@ -757,9 +754,8 @@ static jv f_format(jq_state *jq, jv input, jv fmt) {
     input = f_tostring(jq, input);
     const unsigned char* data = (const unsigned char*)jv_string_value(input);
     int len = jv_string_length_bytes(jv_copy(input));
-    size_t decoded_len = (3 * (size_t)len) / 4; // 3 usable bytes for every 4 bytes of input
+    size_t decoded_len = MAX((3 * (size_t)len) / 4, (size_t)1); // 3 usable bytes for every 4 bytes of input
     char *result = jv_mem_calloc(decoded_len, sizeof(char));
-    memset(result, 0, decoded_len * sizeof(char));
     uint32_t ri = 0;
     int input_bytes_read=0;
     uint32_t code = 0;
@@ -835,11 +831,63 @@ static jv f_sort_by_impl(jq_state *jq, jv input, jv keys) {
   }
 }
 
+/*
+ * Assuming the input array is sorted, bsearch/1 returns
+ * the index of the target if the target is in the input array; and otherwise
+ * (-1 - ix), where ix is the insertion point that would leave the array sorted.
+ * If the input is not sorted, bsearch will terminate but with irrelevant results.
+ */
+static jv f_bsearch(jq_state *jq, jv input, jv target) {
+  if (jv_get_kind(input) != JV_KIND_ARRAY) {
+    jv_free(target);
+    return type_error(input, "cannot be searched from");
+  }
+  int start = 0;
+  int end = jv_array_length(jv_copy(input));
+  jv answer = jv_invalid();
+  while (start < end) {
+    int mid = start + (end - start) / 2;
+    int result = jv_cmp(jv_copy(target), jv_array_get(jv_copy(input), mid));
+    if (result == 0) {
+      answer = jv_number(mid);
+      break;
+    } else if (result < 0) {
+      end = mid;
+    } else {
+      start = mid + 1;
+    }
+  }
+  if (!jv_is_valid(answer)) {
+    answer = jv_number(-1 - start);
+  }
+  jv_free(input);
+  jv_free(target);
+  return answer;
+}
+
 static jv f_group_by_impl(jq_state *jq, jv input, jv keys) {
   if (jv_get_kind(input) == JV_KIND_ARRAY &&
       jv_get_kind(keys) == JV_KIND_ARRAY &&
       jv_array_length(jv_copy(input)) == jv_array_length(jv_copy(keys))) {
     return jv_group(input, keys);
+  } else {
+    return type_error2(input, keys, "cannot be sorted, as they are not both arrays");
+  }
+}
+
+static jv f_unique(jq_state *jq, jv input) {
+  if (jv_get_kind(input) == JV_KIND_ARRAY) {
+    return jv_unique(input, jv_copy(input));
+  } else {
+    return type_error(input, "cannot be sorted, as it is not an array");
+  }
+}
+
+static jv f_unique_by_impl(jq_state *jq, jv input, jv keys) {
+  if (jv_get_kind(input) == JV_KIND_ARRAY &&
+      jv_get_kind(keys) == JV_KIND_ARRAY &&
+      jv_array_length(jv_copy(input)) == jv_array_length(jv_copy(keys))) {
+    return jv_unique(input, keys);
   } else {
     return type_error2(input, keys, "cannot be sorted, as they are not both arrays");
   }
@@ -972,8 +1020,13 @@ static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
         jv captures = jv_array();
         for (int i = 1; i < region->num_regs; ++i) {
           jv cap = jv_object();
-          cap = jv_object_set(cap, jv_string("offset"), jv_number(idx));
-          cap = jv_object_set(cap, jv_string("string"), jv_string(""));
+          if (region->beg[i] == -1) {
+            cap = jv_object_set(cap, jv_string("offset"), jv_number(-1));
+            cap = jv_object_set(cap, jv_string("string"), jv_null());
+          } else {
+            cap = jv_object_set(cap, jv_string("offset"), jv_number(idx));
+            cap = jv_object_set(cap, jv_string("string"), jv_string(""));
+          }
           cap = jv_object_set(cap, jv_string("length"), jv_number(0));
           cap = jv_object_set(cap, jv_string("name"), jv_null());
           captures = jv_array_append(captures, cap);
@@ -1435,8 +1488,10 @@ static time_t my_mktime(struct tm *tm) {
   if (tz != NULL)
     setenv("TZ", "", 1);
   time_t t = mktime(tm);
-  if (tz != NULL)
+  if (tz != NULL) {
     setenv("TZ", tz, 1);
+    free(tz);
+  }
   return t;
 #endif
 }
@@ -1507,14 +1562,9 @@ static jv f_strptime(jq_state *jq, jv a, jv b) {
   memset(&tm, 0, sizeof(tm));
   tm.tm_wday = 8; // sentinel
   tm.tm_yday = 367; // sentinel
+
   const char *input = jv_string_value(a);
   const char *fmt = jv_string_value(b);
-
-#ifndef HAVE_STRPTIME
-  if (strcmp(fmt, "%Y-%m-%dT%H:%M:%SZ")) {
-    return ret_error2(a, b, jv_string("strptime/1 only supports ISO 8601 on this platform"));
-  }
-#endif
   const char *end = strptime(input, fmt, &tm);
   if (end == NULL || (*end != '\0' && !isspace((unsigned char)*end))) {
     return ret_error2(a, b, jv_string_fmt("date \"%s\" does not match format \"%s\"", input, fmt));
@@ -1555,7 +1605,7 @@ static jv f_strptime(jq_state *jq, jv a, jv b) {
   return r;
 }
 
-static int jv2tm(jv a, struct tm *tm) {
+static int jv2tm(jv a, struct tm *tm, int localtime) {
   memset(tm, 0, sizeof(*tm));
   static const size_t offsets[] = {
     offsetof(struct tm, tm_year),
@@ -1585,13 +1635,25 @@ static int jv2tm(jv a, struct tm *tm) {
     jv_free(n);
   }
 
-  // We use UTC everywhere (gettimeofday, gmtime) and UTC does not do DST.
-  // Setting tm_isdst to 0 is done by the memset.
-  // tm->tm_isdst = 0;
+  if (localtime) {
+    tm->tm_isdst = -1;
+    mktime(tm);
+  } else {
+#ifdef HAVE_TIMEGM
+    timegm(tm);
+#elif HAVE_TM_TM_GMT_OFF
+    // tm->tm_gmtoff = 0;
+    tm->tm_zone = "GMT";
+#elif HAVE_TM___TM_GMT_OFF
+    // tm->__tm_gmtoff = 0;
+    tm->__tm_zone = "GMT";
+#endif
+    // tm->tm_isdst = 0;
 
-  // The standard permits the tm structure to contain additional members. We
-  // hope it is okay to initialize them to zero, because the standard does not
-  // provide an alternative.
+    // The standard permits the tm structure to contain additional members. We
+    // hope it is okay to initialize them to zero, because the standard does not
+    // provide an alternative.
+  }
 
   jv_free(a);
   return 1;
@@ -1603,7 +1665,7 @@ static jv f_mktime(jq_state *jq, jv a) {
   if (jv_get_kind(a) != JV_KIND_ARRAY)
     return ret_error(a, jv_string("mktime requires array inputs"));
   struct tm tm;
-  if (!jv2tm(a, &tm))
+  if (!jv2tm(a, &tm, 0))
     return jv_invalid_with_msg(jv_string("mktime requires parsed datetime inputs"));
   time_t t = my_mktime(&tm);
   if (t == (time_t)-1)
@@ -1701,18 +1763,38 @@ static jv f_strftime(jq_state *jq, jv a, jv b) {
   if (jv_get_kind(b) != JV_KIND_STRING)
     return ret_error2(a, b, jv_string("strftime/1 requires a string format"));
   struct tm tm;
-  if (!jv2tm(a, &tm))
+  if (!jv2tm(a, &tm, 0))
     return ret_error(b, jv_string("strftime/1 requires parsed datetime inputs"));
 
   const char *fmt = jv_string_value(b);
-  size_t alloced = strlen(fmt) + 100;
-  char *buf = alloca(alloced);
-  size_t n = strftime(buf, alloced, fmt, &tm);
+  int fmt_not_empty = *fmt != '\0';
+  size_t max_size = strlen(fmt) + 100;
+  char *buf = jv_mem_alloc(max_size);
+#ifdef __APPLE__
+  /* Apple Libc (as of version 1669.40.2) contains a bug which causes it to
+   * ignore the `tm.tm_gmtoff` in favor of the global timezone. To print the
+   * proper timezone offset we temporarily switch the TZ to UTC. */
+  char *tz = (tz = getenv("TZ")) != NULL ? strdup(tz) : NULL;
+  setenv("TZ", "UTC", 1);
+#endif
+  size_t n = strftime(buf, max_size, fmt, &tm);
+#ifdef __APPLE__
+  if (tz) {
+    setenv("TZ", tz, 1);
+    free(tz);
+  } else {
+    unsetenv("TZ");
+  }
+#endif
   jv_free(b);
   /* POSIX doesn't provide errno values for strftime() failures; weird */
-  if (n == 0 || n > alloced)
+  if ((n == 0 && fmt_not_empty) || n > max_size) {
+    free(buf);
     return jv_invalid_with_msg(jv_string("strftime/1: unknown system failure"));
-  return jv_string(buf);
+  }
+  jv ret = jv_string_sized(buf, n);
+  free(buf);
+  return ret;
 }
 #else
 static jv f_strftime(jq_state *jq, jv a, jv b) {
@@ -1732,17 +1814,22 @@ static jv f_strflocaltime(jq_state *jq, jv a, jv b) {
   if (jv_get_kind(b) != JV_KIND_STRING)
     return ret_error2(a, b, jv_string("strflocaltime/1 requires a string format"));
   struct tm tm;
-  if (!jv2tm(a, &tm))
+  if (!jv2tm(a, &tm, 1))
     return ret_error(b, jv_string("strflocaltime/1 requires parsed datetime inputs"));
   const char *fmt = jv_string_value(b);
-  size_t alloced = strlen(fmt) + 100;
-  char *buf = alloca(alloced);
-  size_t n = strftime(buf, alloced, fmt, &tm);
+  int fmt_not_empty = *fmt != '\0';
+  size_t max_size = strlen(fmt) + 100;
+  char *buf = jv_mem_alloc(max_size);
+  size_t n = strftime(buf, max_size, fmt, &tm);
   jv_free(b);
   /* POSIX doesn't provide errno values for strftime() failures; weird */
-  if (n == 0 || n > alloced)
+  if ((n == 0 && fmt_not_empty) || n > max_size) {
+    free(buf);
     return jv_invalid_with_msg(jv_string("strflocaltime/1: unknown system failure"));
-  return jv_string(buf);
+  }
+  jv ret = jv_string_sized(buf, n);
+  free(buf);
+  return ret;
 }
 #else
 static jv f_strflocaltime(jq_state *jq, jv a, jv b) {
@@ -1816,6 +1903,7 @@ BINOPS
   CFUNC(f_dump, "tojson", 1),
   CFUNC(f_json_parse, "fromjson", 1),
   CFUNC(f_tonumber, "tonumber", 1),
+  CFUNC(f_toboolean, "toboolean", 1),
   CFUNC(f_tostring, "tostring", 1),
   CFUNC(f_keys, "keys", 1),
   CFUNC(f_keys_unsorted, "keys_unsorted", 1),
@@ -1844,6 +1932,9 @@ BINOPS
   CFUNC(f_sort, "sort", 1),
   CFUNC(f_sort_by_impl, "_sort_by_impl", 2),
   CFUNC(f_group_by_impl, "_group_by_impl", 2),
+  CFUNC(f_unique, "unique", 1),
+  CFUNC(f_unique_by_impl, "_unique_by_impl", 2),
+  CFUNC(f_bsearch, "bsearch", 2),
   CFUNC(f_min, "min", 1),
   CFUNC(f_max, "max", 1),
   CFUNC(f_min_by_impl, "_min_by_impl", 2),
@@ -1884,7 +1975,7 @@ BINOPS
 
 // This is a hack to make last(g) yield no output values,
 // if g yields no output values, without using boxing.
-static block gen_last_1() {
+static block gen_last_1(void) {
   block last_var = gen_op_var_fresh(STOREV, "last");
   block is_empty_var = gen_op_var_fresh(STOREV, "is_empty");
   block init = BLOCK(gen_op_simple(DUP),

@@ -373,10 +373,7 @@ sections:
           such `1E1234567890`, precision will be lost if the exponent
           is too large.
 
-          (3) In jq programs, a leading minus sign will trigger the
-          conversion of the number to an IEEE754 representation.
-
-          (4) Comparisons are carried out using the untruncated
+          (3) Comparisons are carried out using the untruncated
           big decimal representation of numbers if available, as
           illustrated in one of the following examples.
 
@@ -395,15 +392,19 @@ sections:
             input: '0.12345678901234567890123456789'
             output: ['0.12345678901234567890123456789']
 
-          - program: '[., tojson] | . == if have_decnum then [12345678909876543212345,"12345678909876543212345"] else [12345678909876543000000,"12345678909876543000000"] end'
+          - program: '[., tojson] == if have_decnum then [12345678909876543212345,"12345678909876543212345"] else [12345678909876543000000,"12345678909876543000000"] end'
             input: '12345678909876543212345'
+            output: ['true']
+
+          - program: '[1234567890987654321,-1234567890987654321 | tojson] == if have_decnum then ["1234567890987654321","-1234567890987654321"] else ["1234567890987654400","-1234567890987654400"] end'
+            input: 'null'
             output: ['true']
 
           - program: '. < 0.12345678901234567890123456788'
             input: '0.12345678901234567890123456789'
             output: ['false']
 
-          - program: 'map([., . == 1]) | tojson | . == if have_decnum then "[[1,true],[1.000,true],[1.0,true],[1.00,true]]" else "[[1,true],[1,true],[1,true],[1,true]]" end'
+          - program: 'map([., . == 1]) | tojson == if have_decnum then "[[1,true],[1.000,true],[1.0,true],[1.00,true]]" else "[[1,true],[1,true],[1,true],[1,true]]" end'
             input: '[1, 1.000, 1.0, 100e-2]'
             output: ['true']
 
@@ -1011,15 +1012,15 @@ sections:
 
           The key difference between `map(f)` and `map_values(f)` is
           that the former simply forms an array from all the values of
-          `($x|f)` for each value, $x, in the input array or object,
+          `($x|f)` for each value, `$x`, in the input array or object,
           but `map_values(f)` only uses `first($x|f)`.
 
           Specifically, for object inputs, `map_values(f)` constructs
           the output object by examining in turn the value of
-          `first(.[$k]|f)` for each key, $k, of the input.  If this
+          `first(.[$k]|f)` for each key, `$k`, of the input.  If this
           expression produces no values, then the corresponding key
           will be dropped; otherwise, the output object will have that
-          value at the key, $k.
+          value at the key, `$k`.
 
           Here are some examples to clarify the behavior of `map` and
           `map_values` when applied to arrays. These examples assume the
@@ -1476,6 +1477,18 @@ sections:
             input: '[1, "1"]'
             output: ['1', '1']
 
+      - title: "`toboolean`"
+        body: |
+
+          The `toboolean` function parses its input as a boolean. It
+          will convert correctly-formatted strings to their boolean
+          equivalent, leave booleans alone, and give an error on all other input.
+
+        examples:
+          - program: '.[] | toboolean'
+            input: '["true", "false", true, false]'
+            output: ['true', 'false', 'true', 'false']
+
       - title: "`tostring`"
         body: |
 
@@ -1784,6 +1797,17 @@ sections:
           - program: '[.[]|rtrimstr("foo")]'
             input: '["fo", "foo", "barfoo", "foobar", "foob"]'
             output: ['["fo","","bar","foobar","foob"]']
+
+      - title: "`trimstr(str)`"
+        body: |
+
+          Outputs its input with the given string removed at both ends, if it
+          starts or ends with it.
+
+        examples:
+          - program: '[.[]|trimstr("foo")]'
+            input: '["fo", "foo", "barfoo", "foobarfoo", "foob"]'
+            output: ['["fo","","bar","bar","b"]']
 
       - title: "`trim`, `ltrim`, `rtrim`"
         body: |
@@ -2292,13 +2316,13 @@ sections:
 
           jq provides a few SQL-style operators.
 
-          * INDEX(stream; index_expression):
+          * `INDEX(stream; index_expression)`:
 
             This builtin produces an object whose keys are computed by
             the given index expression applied to each value from the
             given stream.
 
-          * JOIN($idx; stream; idx_expr; join_expr):
+          * `JOIN($idx; stream; idx_expr; join_expr)`:
 
             This builtin joins the values from the given stream to the
             given index.  The index's keys are computed by applying the
@@ -2307,22 +2331,22 @@ sections:
             value from the index is fed to the given join expression to
             produce each result.
 
-          * JOIN($idx; stream; idx_expr):
+          * `JOIN($idx; stream; idx_expr)`:
 
             Same as `JOIN($idx; stream; idx_expr; .)`.
 
-          * JOIN($idx; idx_expr):
+          * `JOIN($idx; idx_expr)`:
 
             This builtin joins the input `.` to the given index, applying
             the given index expression to `.` to compute the index key.
             The join operation is as described above.
 
-          * IN(s):
+          * `IN(s)`:
 
             This builtin outputs `true` if `.` appears in the given
             stream, otherwise it outputs `false`.
 
-          * IN(source; s):
+          * `IN(source; s)`:
 
             This builtin outputs `true` if any value in the source stream
             appears in the second stream, otherwise it outputs `false`.
@@ -2699,12 +2723,17 @@ sections:
           that match the regex in accordance with the flags, if any
           have been specified.  If there is no match, the stream is empty.
           To capture all the matches for each input string, use the idiom
-          `[ expr ]`, e.g. `[ scan(regex) ]`.
+          `[ expr ]`, e.g. `[ scan(regex) ]`.  If the regex contains capturing
+          groups, the filter emits a stream of arrays, each of which contains
+          the captured strings.
 
         examples:
           - program: 'scan("c")'
             input: '"abcdefabc"'
             output: ['"c"', '"c"']
+          - program: 'scan("(a+)(b+)")'
+            input: '"abaabbaaabbb"'
+            output: ['["a","b"]', '["aa","bb"]', '["aaa","bbb"]']
 
       - title: "`split(regex; flags)`"
         body: |
@@ -2729,6 +2758,9 @@ sections:
         examples:
           - program: 'splits(", *")'
             input: '"ab,cd,   ef, gh"'
+            output: ['"ab"','"cd"','"ef"','"gh"']
+          - program: 'splits(",? *"; "n")'
+            input: '"ab,cd ef,  gh"'
             output: ['"ab"','"cd"','"ef"','"gh"']
 
       - title: "`sub(regex; tostring)`, `sub(regex; tostring; flags)`"
@@ -2844,7 +2876,7 @@ sections:
               {"title": "First post", "author": "Anonymous Coward"}
               {"title": "A well-written article", "author": "Person McPherson"}
 
-          We use a variable, $names, to store the realnames object, so that we
+          We use a variable, `$names`, to store the realnames object, so that we
           can refer to it later when looking up author usernames:
 
               .realnames as $names | .posts[] | {title, author: $names[.author]}
@@ -3223,9 +3255,8 @@ sections:
                     def _range:
                         if (by > 0 and . < upto) or (by < 0 and . > upto)
                         then ., ((.+by)|_range)
-                        else . end;
-                    if by == 0 then init else init|_range end |
-                    select((by > 0 and . < upto) or (by < 0 and . > upto));
+                        else empty end;
+                    if init == upto then empty elif by == 0 then init else init|_range end;
                 range(0; 10; 3)'
             input: 'null'
             output: ['0', '3', '6', '9']
@@ -3302,7 +3333,7 @@ sections:
 
           Outputs one new input.
 
-          Note that when using `input` it is generally be necessary to
+          Note that when using `input` it is generally necessary to
           invoke jq with the `-n` command-line option, otherwise
           the first entity will be lost.
 
@@ -3379,8 +3410,8 @@ sections:
 
       Several builtins are provided to make handling streams easier.
 
-      The examples below use the streamed form of `[0,[1]]`, which is
-      `[[0],0],[[1,0],1],[[1,0]],[[1]]`.
+      The examples below use the streamed form of `["a",["b"]]`, which is
+      `[[0],"a"],[[1,0],"b"],[[1,0]],[[1]]`.
 
       Streaming forms include `[<path>, <leaf-value>]` (to indicate any
       scalar value, empty array, or empty object), and `[<path>]` (to
@@ -3397,9 +3428,9 @@ sections:
           given streaming expression.
 
         examples:
-          - program: 'truncate_stream([[0],1],[[1,0],2],[[1,0]],[[1]])'
+          - program: 'truncate_stream([[0],"a"],[[1,0],"b"],[[1,0]],[[1]])'
             input: '1'
-            output: ['[[0],2]', '[[0]]']
+            output: ['[[0],"b"]', '[[0]]']
 
       - title: "`fromstream(stream_expression)`"
         body: |
@@ -3408,9 +3439,9 @@ sections:
           outputs.
 
         examples:
-          - program: 'fromstream(1|truncate_stream([[0],1],[[1,0],2],[[1,0]],[[1]]))'
+          - program: 'fromstream(1|truncate_stream([[0],"a"],[[1,0],"b"],[[1,0]],[[1]]))'
             input: 'null'
-            output: ['[2]']
+            output: ['["b"]']
 
       - title: "`tostream`"
         body: |

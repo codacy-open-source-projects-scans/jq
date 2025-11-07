@@ -119,15 +119,15 @@ const jv JV_INVALID = {JVP_FLAGS_INVALID, 0, 0, 0, {0}};
 const jv JV_FALSE = {JVP_FLAGS_FALSE, 0, 0, 0, {0}};
 const jv JV_TRUE = {JVP_FLAGS_TRUE, 0, 0, 0, {0}};
 
-jv jv_true() {
+jv jv_true(void) {
   return JV_TRUE;
 }
 
-jv jv_false() {
+jv jv_false(void) {
   return JV_FALSE;
 }
 
-jv jv_null() {
+jv jv_null(void) {
   return JV_NULL;
 }
 
@@ -155,7 +155,7 @@ jv jv_invalid_with_msg(jv err) {
   return x;
 }
 
-jv jv_invalid() {
+jv jv_invalid(void) {
   return JV_INVALID;
 }
 
@@ -205,9 +205,6 @@ enum {
   JVP_NUMBER_NATIVE = 0,
   JVP_NUMBER_DECIMAL = 1
 };
-
-#define JV_NUMBER_SIZE_INIT      (0)
-#define JV_NUMBER_SIZE_CONVERTED (1)
 
 #define JVP_FLAGS_NUMBER_NATIVE       JVP_MAKE_FLAGS(JV_KIND_NUMBER, JVP_MAKE_PFLAGS(JVP_NUMBER_NATIVE, 0))
 #define JVP_FLAGS_NUMBER_LITERAL      JVP_MAKE_FLAGS(JV_KIND_NUMBER, JVP_MAKE_PFLAGS(JVP_NUMBER_DECIMAL, 1))
@@ -495,12 +492,12 @@ static pthread_once_t dec_ctx_once = PTHREAD_ONCE_INIT;
 
 // atexit finalizer to clean up the tsd dec contexts if main() exits
 // without having called pthread_exit()
-void jv_tsd_dec_ctx_fini() {
+void jv_tsd_dec_ctx_fini(void) {
   jv_mem_free(pthread_getspecific(dec_ctx_key));
   pthread_setspecific(dec_ctx_key, NULL);
 }
 
-void jv_tsd_dec_ctx_init() {
+void jv_tsd_dec_ctx_init(void) {
   if (pthread_key_create(&dec_ctx_key, jv_mem_free) != 0) {
     fprintf(stderr, "error: cannot create thread specific key");
     abort();
@@ -562,7 +559,6 @@ static decNumber* jvp_dec_number_ptr(jv j) {
 }
 
 static jvp_literal_number* jvp_literal_number_alloc(unsigned literal_length) {
-
   /* The number of units needed is ceil(DECNUMDIGITS/DECDPUN)         */
   int units = ((literal_length+DECDPUN-1)/DECDPUN);
 
@@ -571,26 +567,34 @@ static jvp_literal_number* jvp_literal_number_alloc(unsigned literal_length) {
     + sizeof(decNumberUnit) * units
   );
 
+  n->refcnt = JV_REFCNT_INIT;
+  n->num_double = NAN;
+  n->literal_data = NULL;
   return n;
 }
 
 static jv jvp_literal_number_new(const char * literal) {
+  jvp_literal_number* n = jvp_literal_number_alloc(strlen(literal));
 
-  jvp_literal_number * n = jvp_literal_number_alloc(strlen(literal));
-
-  n->refcnt = JV_REFCNT_INIT;
-  n->literal_data = NULL;
   decContext *ctx = DEC_CONTEXT();
   decContextClearStatus(ctx, DEC_Conversion_syntax);
   decNumberFromString(&n->num_decimal, literal, ctx);
-  n->num_double = NAN;
 
   if (ctx->status & DEC_Conversion_syntax) {
     jv_mem_free(n);
     return JV_INVALID;
   }
+  if (decNumberIsNaN(&n->num_decimal)) {
+    // Reject NaN with payload.
+    if (n->num_decimal.digits > 1 || *n->num_decimal.lsu != 0) {
+      jv_mem_free(n);
+      return JV_INVALID;
+    }
+    jv_mem_free(n);
+    return jv_number(NAN);
+  }
 
-  jv r = {JVP_FLAGS_NUMBER_LITERAL, 0, 0, JV_NUMBER_SIZE_INIT, {&n->refcnt}};
+  jv r = {JVP_FLAGS_NUMBER_LITERAL, 0, 0, 0, {&n->refcnt}};
   return r;
 }
 
@@ -698,9 +702,8 @@ double jv_number_value(jv j) {
   if (JVP_HAS_FLAGS(j, JVP_FLAGS_NUMBER_LITERAL)) {
     jvp_literal_number* n = jvp_literal_number_ptr(j);
 
-    if (j.size != JV_NUMBER_SIZE_CONVERTED) {
+    if (isnan(n->num_double)) {
       n->num_double = jvp_literal_number_to_double(j);
-      j.size = JV_NUMBER_SIZE_CONVERTED;
     }
 
     return n->num_double;
@@ -731,7 +734,37 @@ int jvp_number_is_nan(jv n) {
     return decNumberIsNaN(pdec);
   }
 #endif
-  return n.u.number != n.u.number;
+  return isnan(n.u.number);
+}
+
+jv jv_number_abs(jv n) {
+  assert(JVP_HAS_KIND(n, JV_KIND_NUMBER));
+
+#ifdef USE_DECNUM
+  if (JVP_HAS_FLAGS(n, JVP_FLAGS_NUMBER_LITERAL)) {
+    jvp_literal_number* m = jvp_literal_number_alloc(jvp_dec_number_ptr(n)->digits);
+
+    decNumberAbs(&m->num_decimal, jvp_dec_number_ptr(n), DEC_CONTEXT());
+    jv r = {JVP_FLAGS_NUMBER_LITERAL, 0, 0, 0, {&m->refcnt}};
+    return r;
+  }
+#endif
+  return jv_number(fabs(jv_number_value(n)));
+}
+
+jv jv_number_negate(jv n) {
+  assert(JVP_HAS_KIND(n, JV_KIND_NUMBER));
+
+#ifdef USE_DECNUM
+  if (JVP_HAS_FLAGS(n, JVP_FLAGS_NUMBER_LITERAL)) {
+    jvp_literal_number* m = jvp_literal_number_alloc(jvp_dec_number_ptr(n)->digits);
+
+    decNumberMinus(&m->num_decimal, jvp_dec_number_ptr(n), DEC_CONTEXT());
+    jv r = {JVP_FLAGS_NUMBER_LITERAL, 0, 0, 0, {&m->refcnt}};
+    return r;
+  }
+#endif
+  return jv_number(-jv_number_value(n));
 }
 
 int jvp_number_cmp(jv a, jv b) {
@@ -958,7 +991,7 @@ jv jv_array_sized(int n) {
   return jvp_array_new(n);
 }
 
-jv jv_array() {
+jv jv_array(void) {
   return jv_array_sized(16);
 }
 
@@ -992,6 +1025,11 @@ jv jv_array_set(jv j, int idx, jv val) {
     jv_free(val);
     return jv_invalid_with_msg(jv_string("Out of bounds negative array index"));
   }
+  if (idx > (INT_MAX >> 2) - jvp_array_offset(j)) {
+    jv_free(j);
+    jv_free(val);
+    return jv_invalid_with_msg(jv_string("Array index too large"));
+  }
   // copy/free of val,j coalesced
   jv* slot = jvp_array_write(&j, idx);
   jv_free(*slot);
@@ -1011,6 +1049,7 @@ jv jv_array_concat(jv a, jv b) {
   // FIXME: could be faster
   jv_array_foreach(b, i, elem) {
     a = jv_array_append(a, elem);
+    if (!jv_is_valid(a)) break;
   }
   jv_free(b);
   return a;
@@ -1109,6 +1148,7 @@ static jv jvp_string_empty_new(uint32_t length) {
   jvp_string* s = jvp_string_alloc(length);
   s->length_hashed = 0;
   memset(s->data, 0, length);
+  s->data[length] = 0;
   jv r = {JVP_FLAGS_STRING, 0, 0, 0, {&s->refcnt}};
   return r;
 }
@@ -1288,12 +1328,39 @@ jv jv_string_indexes(jv j, jv k) {
       }
 
       a = jv_array_append(a, jv_number(n));
+      if (!jv_is_valid(a)) break;
       p++;
     }
   }
   jv_free(j);
   jv_free(k);
   return a;
+}
+
+jv jv_string_repeat(jv j, int n) {
+  assert(JVP_HAS_KIND(j, JV_KIND_STRING));
+  if (n < 0) {
+    jv_free(j);
+    return jv_null();
+  }
+  int len = jv_string_length_bytes(jv_copy(j));
+  int64_t res_len = (int64_t)len * n;
+  if (res_len >= INT_MAX) {
+    jv_free(j);
+    return jv_invalid_with_msg(jv_string("Repeat string result too long"));
+  }
+  if (res_len == 0) {
+    jv_free(j);
+    return jv_string("");
+  }
+  jv res = jv_string_empty(res_len);
+  res = jvp_string_append(res, jv_string_value(j), len);
+  for (int curr = len, grow; curr < res_len; curr += grow) {
+    grow = MIN(res_len - curr, curr);
+    res = jvp_string_append(res, jv_string_value(res), grow);
+  }
+  jv_free(j);
+  return res;
 }
 
 jv jv_string_split(jv j, jv sep) {
@@ -1310,14 +1377,17 @@ jv jv_string_split(jv j, jv sep) {
 
   if (seplen == 0) {
     int c;
-    while ((jstr = jvp_utf8_next(jstr, jend, &c)))
+    while ((jstr = jvp_utf8_next(jstr, jend, &c))) {
       a = jv_array_append(a, jv_string_append_codepoint(jv_string(""), c));
+      if (!jv_is_valid(a)) break;
+    }
   } else {
     for (p = jstr; p < jend; p = s + seplen) {
       s = _jq_memmem(p, jend - p, sepstr, seplen);
       if (s == NULL)
         s = jend;
       a = jv_array_append(a, jv_string_sized(p, s - p));
+      if (!jv_is_valid(a)) break;
       // Add an empty string to denote that j ends on a sep
       if (s + seplen == jend && seplen != 0)
         a = jv_array_append(a, jv_string(""));
@@ -1335,8 +1405,10 @@ jv jv_string_explode(jv j) {
   const char* end = i + len;
   jv a = jv_array_sized(len);
   int c;
-  while ((i = jvp_utf8_next(i, end, &c)))
+  while ((i = jvp_utf8_next(i, end, &c))) {
     a = jv_array_append(a, jv_number(c));
+    if (!jv_is_valid(a)) break;
+  }
   jv_free(j);
   return a;
 }
@@ -1610,10 +1682,13 @@ static void jvp_object_free(jv o) {
   }
 }
 
-static jv jvp_object_rehash(jv object) {
+static int jvp_object_rehash(jv *objectp) {
+  jv object = *objectp;
   assert(JVP_HAS_KIND(object, JV_KIND_OBJECT));
   assert(jvp_refcnt_unshared(object.u.ptr));
   int size = jvp_object_size(object);
+  if (size > INT_MAX >> 2)
+    return 0;
   jv new_object = jvp_object_new(size * 2);
   for (int i=0; i<size; i++) {
     struct object_slot* slot = jvp_object_get_slot(object, i);
@@ -1626,7 +1701,8 @@ static jv jvp_object_rehash(jv object) {
   }
   // references are transported, just drop the old table
   jv_mem_free(jvp_object_ptr(object));
-  return new_object;
+  *objectp = new_object;
+  return 1;
 }
 
 static jv jvp_object_unshare(jv object) {
@@ -1655,27 +1731,32 @@ static jv jvp_object_unshare(jv object) {
   return new_object;
 }
 
-static jv* jvp_object_write(jv* object, jv key) {
+static int jvp_object_write(jv* object, jv key, jv **valpp) {
   *object = jvp_object_unshare(*object);
   int* bucket = jvp_object_find_bucket(*object, key);
   struct object_slot* slot = jvp_object_find_slot(*object, key, bucket);
   if (slot) {
     // already has the key
     jvp_string_free(key);
-    return &slot->value;
+    *valpp = &slot->value;
+    return 1;
   }
   slot = jvp_object_add_slot(*object, key, bucket);
   if (slot) {
     slot->value = jv_invalid();
   } else {
-    *object = jvp_object_rehash(*object);
+    if (!jvp_object_rehash(object)) {
+      *valpp = NULL;
+      return 0;
+    }
     bucket = jvp_object_find_bucket(*object, key);
     assert(!jvp_object_find_slot(*object, key, bucket));
     slot = jvp_object_add_slot(*object, key, bucket);
     assert(slot);
     slot->value = jv_invalid();
   }
-  return &slot->value;
+  *valpp = &slot->value;
+  return 1;
 }
 
 static int jvp_object_delete(jv* object, jv key) {
@@ -1742,7 +1823,7 @@ static int jvp_object_contains(jv a, jv b) {
  * Objects (public interface)
  */
 #define DEFAULT_OBJECT_SIZE 8
-jv jv_object() {
+jv jv_object(void) {
   return jvp_object_new(8);
 }
 
@@ -1775,7 +1856,11 @@ jv jv_object_set(jv object, jv key, jv value) {
   assert(JVP_HAS_KIND(object, JV_KIND_OBJECT));
   assert(JVP_HAS_KIND(key, JV_KIND_STRING));
   // copy/free of object, key, value coalesced
-  jv* slot = jvp_object_write(&object, key);
+  jv* slot;
+  if (!jvp_object_write(&object, key, &slot)) {
+    jv_free(object);
+    return jv_invalid_with_msg(jv_string("Object too big"));
+  }
   jv_free(*slot);
   *slot = value;
   return object;
@@ -1800,6 +1885,7 @@ jv jv_object_merge(jv a, jv b) {
   assert(JVP_HAS_KIND(a, JV_KIND_OBJECT));
   jv_object_foreach(b, k, v) {
     a = jv_object_set(a, k, v);
+    if (!jv_is_valid(a)) break;
   }
   jv_free(b);
   return a;
@@ -1819,6 +1905,7 @@ jv jv_object_merge_recursive(jv a, jv b) {
       jv_free(elem);
       a = jv_object_set(a, k, v);
     }
+    if (!jv_is_valid(a)) break;
   }
   jv_free(b);
   return a;
