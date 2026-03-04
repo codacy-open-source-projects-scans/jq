@@ -50,24 +50,23 @@ BINOPS
 
 
 static jv type_error(jv bad, const char* msg) {
-  char errbuf[15];
+  char errbuf[30];
   const char *badkind = jv_kind_name(jv_get_kind(bad));
-  jv err = jv_invalid_with_msg(jv_string_fmt("%s (%s) %s", badkind,
-                                             jv_dump_string_trunc(bad, errbuf, sizeof(errbuf)),
-                                             msg));
+  jv err = jv_invalid_with_msg(jv_string_fmt(
+        "%s (%s) %s", badkind,
+        jv_dump_string_trunc(bad, errbuf, sizeof(errbuf)), msg));
   return err;
 }
 
 static jv type_error2(jv bad1, jv bad2, const char* msg) {
-  char errbuf1[15],errbuf2[15];
+  char errbuf1[30], errbuf2[30];
   const char *badkind1 = jv_kind_name(jv_get_kind(bad1));
   const char *badkind2 = jv_kind_name(jv_get_kind(bad2));
-  jv err = jv_invalid_with_msg(jv_string_fmt("%s (%s) and %s (%s) %s",
-                                             badkind1,
-                                             jv_dump_string_trunc(bad1, errbuf1, sizeof(errbuf1)),
-                                             badkind2,
-                                             jv_dump_string_trunc(bad2, errbuf2, sizeof(errbuf2)),
-                                             msg));
+  jv err = jv_invalid_with_msg(jv_string_fmt(
+        "%s (%s) and %s (%s) %s", badkind1,
+        jv_dump_string_trunc(bad1, errbuf1, sizeof(errbuf1)),
+        badkind2,
+        jv_dump_string_trunc(bad2, errbuf2, sizeof(errbuf2)), msg));
   return err;
 }
 
@@ -357,7 +356,7 @@ jv binop_divide(jv a, jv b) {
   }
 }
 
-#define dtoi(n) ((n) < INTMAX_MIN ? INTMAX_MIN : -(n) < INTMAX_MIN ? INTMAX_MAX : (intmax_t)(n))
+#define dtoi(n) ((n) < INTMAX_MIN ? INTMAX_MIN : -(n) <= INTMAX_MIN ? INTMAX_MAX : (intmax_t)(n))
 jv binop_mod(jv a, jv b) {
   if (jv_get_kind(a) == JV_KIND_NUMBER && jv_get_kind(b) == JV_KIND_NUMBER) {
     double na = jv_number_value(a);
@@ -1418,13 +1417,13 @@ static jv f_stderr(jq_state *jq, jv input) {
   return input;
 }
 
-static jv tm2jv(struct tm *tm) {
+static jv tm2jv(struct tm *tm, double fsecs) {
   return JV_ARRAY(jv_number(tm->tm_year + 1900),
                   jv_number(tm->tm_mon),
                   jv_number(tm->tm_mday),
                   jv_number(tm->tm_hour),
                   jv_number(tm->tm_min),
-                  jv_number(tm->tm_sec),
+                  jv_number(tm->tm_sec + (fsecs - floor(fsecs))),
                   jv_number(tm->tm_wday),
                   jv_number(tm->tm_yday));
 }
@@ -1598,7 +1597,7 @@ static jv f_strptime(jq_state *jq, jv a, jv b) {
   if (tm.tm_yday == 367 && tm.tm_mday != 0 && tm.tm_mon >= 0 && tm.tm_mon <= 11)
     set_tm_yday(&tm);
 #endif
-  jv r = tm2jv(&tm);
+  jv r = tm2jv(&tm, 0);
   if (*end != '\0')
     r = jv_array_append(r, jv_string(end));
   jv_free(a); // must come after `*end` because `end` is a pointer into `a`'s string
@@ -1687,8 +1686,7 @@ static jv f_gmtime(jq_state *jq, jv a) {
   tmp = gmtime_r(&secs, &tm);
   if (tmp == NULL)
     return jv_invalid_with_msg(jv_string("error converting number of seconds since epoch to datetime"));
-  a = tm2jv(tmp);
-  return jv_array_set(a, 5, jv_number(jv_number_value(jv_array_get(jv_copy(a), 5)) + (fsecs - floor(fsecs))));
+  return tm2jv(tmp, fsecs);
 }
 #elif defined HAVE_GMTIME
 static jv f_gmtime(jq_state *jq, jv a) {
@@ -1702,8 +1700,7 @@ static jv f_gmtime(jq_state *jq, jv a) {
   tmp = gmtime(&secs);
   if (tmp == NULL)
     return jv_invalid_with_msg(jv_string("error converting number of seconds since epoch to datetime"));
-  a = tm2jv(tmp);
-  return jv_array_set(a, 5, jv_number(jv_number_value(jv_array_get(jv_copy(a), 5)) + (fsecs - floor(fsecs))));
+  return tm2jv(tmp, fsecs);
 }
 #else
 static jv f_gmtime(jq_state *jq, jv a) {
@@ -1724,8 +1721,7 @@ static jv f_localtime(jq_state *jq, jv a) {
   tmp = localtime_r(&secs, &tm);
   if (tmp == NULL)
     return jv_invalid_with_msg(jv_string("error converting number of seconds since epoch to datetime"));
-  a = tm2jv(tmp);
-  return jv_array_set(a, 5, jv_number(jv_number_value(jv_array_get(jv_copy(a), 5)) + (fsecs - floor(fsecs))));
+  return tm2jv(tmp, fsecs);
 }
 #elif defined HAVE_GMTIME
 static jv f_localtime(jq_state *jq, jv a) {
@@ -1739,8 +1735,7 @@ static jv f_localtime(jq_state *jq, jv a) {
   tmp = localtime(&secs);
   if (tmp == NULL)
     return jv_invalid_with_msg(jv_string("error converting number of seconds since epoch to datetime"));
-  a = tm2jv(tmp);
-  return jv_array_set(a, 5, jv_number(jv_number_value(jv_array_get(jv_copy(a), 5)) + (fsecs - floor(fsecs))));
+  return tm2jv(tmp, fsecs);
 }
 #else
 static jv f_localtime(jq_state *jq, jv a) {
@@ -1808,6 +1803,10 @@ static jv f_strftime(jq_state *jq, jv a, jv b) {
 static jv f_strflocaltime(jq_state *jq, jv a, jv b) {
   if (jv_get_kind(a) == JV_KIND_NUMBER) {
     a = f_localtime(jq, a);
+    if (!jv_is_valid(a)) {
+      jv_free(b);
+      return a;
+    }
   } else if (jv_get_kind(a) != JV_KIND_ARRAY) {
     return ret_error2(a, b, jv_string("strflocaltime/1 requires parsed datetime inputs"));
   }
